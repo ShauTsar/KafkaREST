@@ -26,7 +26,12 @@ func produceMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageBytes, _ := json.Marshal(msg)
+	messageBytes, err := json.Marshal(msg)
+	if err != nil {
+		http.Error(w, "Failed to marshal message", http.StatusInternalServerError)
+		log.Printf("Ошибка сериализации: %v", err)
+		return
+	}
 
 	writer := &kafka.Writer{
 		Addr:     kafka.TCP(KafkaBroker),
@@ -38,6 +43,7 @@ func produceMessage(w http.ResponseWriter, r *http.Request) {
 		Value: messageBytes,
 	})
 	if err != nil {
+		log.Printf("Ошибка записи в Kafka: %v", err)
 		http.Error(w, "Failed to send message to Kafka", http.StatusInternalServerError)
 		return
 	}
@@ -64,12 +70,10 @@ func startConsumer() {
 		m, err := reader.ReadMessage(context.Background())
 		if err != nil {
 			log.Printf("Ошибка чтения сообщения: %v\n", err)
+			time.Sleep(5 * time.Second) // Ждем перед повторной попыткой
 			continue
 		}
-
 		log.Printf("Получено сообщение: %s\n", string(m.Value))
-
-		// Отправляем сообщение в 1С УПР
 		go sendTo1C(m.Value)
 	}
 }
