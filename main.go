@@ -52,7 +52,43 @@ func produceMessage(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Message sent to Kafka"))
 }
 
-// 50 MB 50e6
+// Consumer для ручного запроса сообщений
+func consumeMessage(w http.ResponseWriter, r *http.Request) {
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  []string{KafkaBroker},
+		Topic:    Topic,
+		MaxBytes: 10e6, // 10MB
+		// Без GroupID, чтобы читать напрямую, не привязываясь к группе
+	})
+
+	defer reader.Close()
+
+	// Устанавливаем таймаут для чтения, чтобы не зависать
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	msg, err := reader.ReadMessage(ctx)
+	if err != nil {
+		if err == context.DeadlineExceeded {
+			http.Error(w, "No messages available within timeout", http.StatusNotFound)
+			return
+		}
+		log.Printf("Ошибка чтения сообщения: %v", err)
+		http.Error(w, "Failed to read message from Kafka", http.StatusInternalServerError)
+		return
+	}
+
+	// Возвращаем сообщение в формате JSON
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"offset": msg.Offset,
+		"key":    string(msg.Key),
+		"value":  string(msg.Value),
+		"time":   msg.Time,
+	})
+}
+
 // Фоновый Consumer
 func startConsumer() {
 	reader := kafka.NewReader(kafka.ReaderConfig{
@@ -102,10 +138,12 @@ func sendTo1C(data []byte) {
 
 // Главная функция
 func main() {
-	// Запускаем Consumer в фоновом режиме
+	// Запускаем фоновый Consumer
 	go startConsumer()
 
+	// Регистрируем обработчики REST API
 	http.HandleFunc("/produce", produceMessage)
+	http.HandleFunc("/consume", consumeMessage)
 
 	fmt.Println("REST API сервер запущен на порту 8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
