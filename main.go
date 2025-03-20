@@ -156,7 +156,7 @@ func sendTo1C(data []byte) {
 // Главная функция
 func main() {
 	// Запускаем фоновый Consumer
-	go startConsumer()
+	//go startConsumer()
 
 	// Регистрируем обработчики REST API
 	http.HandleFunc("/produce", produceMessage)
