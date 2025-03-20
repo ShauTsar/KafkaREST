@@ -55,26 +55,37 @@ func produceMessage(w http.ResponseWriter, r *http.Request) {
 // Consumer для ручного запроса сообщений
 func consumeMessage(w http.ResponseWriter, r *http.Request) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{KafkaBroker},
-		Topic:    Topic,
-		MaxBytes: 10e6, // 10MB
-		// Без GroupID, чтобы читать напрямую, не привязываясь к группе
+		Brokers:   []string{KafkaBroker},
+		Topic:     Topic,
+		MaxBytes:  10e6, // 10MB
+		Partition: 0,    // Читаем только из первой партиции (для простоты)
 	})
+
+	// Начинаем с последнего сообщения
+	reader.SetOffset(kafka.LastOffset)
 
 	defer reader.Close()
 
-	// Устанавливаем таймаут для чтения, чтобы не зависать
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	msg, err := reader.ReadMessage(ctx)
+	msg, err := reader.FetchMessage(ctx) // Используем FetchMessage вместо ReadMessage, чтобы не коммитить автоматически
 	if err != nil {
 		if err == context.DeadlineExceeded {
-			http.Error(w, "No messages available within timeout", http.StatusNotFound)
+			http.Error(w, "No new messages available within timeout", http.StatusNotFound)
 			return
 		}
 		log.Printf("Ошибка чтения сообщения: %v", err)
 		http.Error(w, "Failed to read message from Kafka", http.StatusInternalServerError)
+		return
+	}
+
+	// Десериализуем value как JSON
+	var value interface{}
+	err = json.Unmarshal(msg.Value, &value)
+	if err != nil {
+		log.Printf("Ошибка десериализации сообщения: %v", err)
+		http.Error(w, "Failed to parse message value", http.StatusInternalServerError)
 		return
 	}
 
@@ -84,9 +95,15 @@ func consumeMessage(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"offset": msg.Offset,
 		"key":    string(msg.Key),
-		"value":  string(msg.Value),
+		"value":  value, // Возвращаем как объект, а не строку
 		"time":   msg.Time,
 	})
+
+	// Коммитим offset вручную, чтобы отметить сообщение как прочитанное
+	err = reader.CommitMessages(ctx, msg)
+	if err != nil {
+		log.Printf("Ошибка коммита offset: %v", err)
+	}
 }
 
 // Фоновый Consumer
