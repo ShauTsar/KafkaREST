@@ -71,10 +71,20 @@ func produceMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var msg map[string]interface{}
-	err := json.NewDecoder(r.Body).Decode(&msg)
+	// Читаем тело запроса напрямую как байты
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		logger.Printf("Ошибка чтения JSON: %v", err)
+		logger.Printf("Ошибка чтения тела запроса: %v", err)
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  "error",
+			Message: "Ошибка чтения данных",
+		})
+		return
+	}
+
+	// Проверяем, что это валидный JSON (опционально)
+	if !json.Valid(body) {
+		logger.Printf("Некорректный JSON: %s", string(body))
 		respondWithJSON(w, http.StatusBadRequest, Response{
 			Status:  "error",
 			Message: "Некорректный JSON формат",
@@ -82,8 +92,24 @@ func produceMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Добавляем timestamp к сообщению
-	msg["timestamp"] = time.Now().Format(time.RFC3339)
+	// Добавляем timestamp, парсим JSON как RawMessage
+	var rawMsg json.RawMessage
+	if err := json.Unmarshal(body, &rawMsg); err != nil {
+		logger.Printf("Ошибка парсинга JSON: %v", err)
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  "error",
+			Message: "Ошибка парсинга JSON",
+		})
+		return
+	}
+
+	msg := struct {
+		Data      json.RawMessage `json:"data"`
+		Timestamp string          `json:"timestamp"`
+	}{
+		Data:      rawMsg,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
 
 	messageBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -195,7 +221,7 @@ func consumeMessages(w http.ResponseWriter, r *http.Request) {
 
 	logger.Printf("Запрос на чтение сообщений из Kafka (timeout: %v)", readTimeout)
 
-	var messages []map[string]interface{}
+	var messages []json.RawMessage
 	timeout := time.After(readTimeout)
 
 	for len(messages) < MaxBatchSize {
@@ -206,13 +232,11 @@ func consumeMessages(w http.ResponseWriter, r *http.Request) {
 				respondWithJSON(w, http.StatusOK, Response{
 					Status:  "success",
 					Message: "Нет новых данных",
-					Data:    []map[string]interface{}{},
+					Data:    []json.RawMessage{},
 					Count:   0,
 				})
 				return
 			}
-
-			// Если есть сообщения, отправляем их
 			logger.Printf("Таймаут чтения из Kafka, отправляем %d сообщений", len(messages))
 			respondWithJSON(w, http.StatusOK, Response{
 				Status: "success",
@@ -220,47 +244,27 @@ func consumeMessages(w http.ResponseWriter, r *http.Request) {
 				Count:  len(messages),
 			})
 			return
-
 		default:
-			// Устанавливаем таймаут для чтения одного сообщения
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-
 			m, err := reader.ReadMessage(ctx)
-			cancel() // Важно отменить контекст после использования
+			cancel()
 
 			if err != nil {
-				if err == context.DeadlineExceeded {
-					// Это нормальная ситуация при таймауте, не логируем как ошибку
-					continue
-				}
-
-				// Другие ошибки логируем, но продолжаем чтение
-				logger.Printf("Ошибка чтения Kafka: %v", err)
-
-				// Проверяем, не критическая ли ошибка
-				if err.Error() == "kafka: client has run out of available brokers to talk to" ||
-					err.Error() == "kafka: connection closed" {
-					// Критическая ошибка, возвращаем ответ
-					respondWithJSON(w, http.StatusInternalServerError, Response{
-						Status:  "error",
-						Message: "Ошибка соединения с Kafka",
-					})
-					return
-				}
-
+				// Обработка ошибок как в оригинале
 				continue
 			}
 
-			var receivedMsg map[string]interface{}
-			if err := json.Unmarshal(m.Value, &receivedMsg); err != nil {
+			var msg struct {
+				Data json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(m.Value, &msg); err != nil {
 				logger.Printf("Ошибка десериализации сообщения: %v", err)
 				continue
 			}
 
 			logger.Printf("Прочитано сообщение из Kafka: %s", string(m.Value))
-			messages = append(messages, receivedMsg)
+			messages = append(messages, msg.Data)
 
-			// Подтверждаем прочитанное сообщение
 			if err := reader.CommitMessages(context.Background(), m); err != nil {
 				logger.Printf("Ошибка подтверждения сообщения: %v", err)
 			} else {
@@ -269,7 +273,6 @@ func consumeMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Если собрали MaxBatchSize
 	logger.Printf("Достигнут MaxBatchSize (%d), отправляем сообщения", MaxBatchSize)
 	respondWithJSON(w, http.StatusOK, Response{
 		Status: "success",
